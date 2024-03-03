@@ -7,3 +7,24 @@
 [submodule "deps/matheus28-ws28"]
 	path = deps/matheus28-ws28
 	url = https://github.com/Matheus28/ws28
+[submodule "deps/libuv-libuv"]
+	path = deps/libuv-libuv
+	url = https://github.com/libuv/libuv
+[submodule "deps/bitcoin-core-libsecp256k1"]
+	path = deps/bitcoin-core-libsecp256k1
+	url = https://github.com/bitcoin-core/secp256k1
+[submodule "deps/fnc12-sqlite_orm"]
+	path = deps/fnc12-sqlite_orm
+	url = https://github.com/fnc12/sqlite_orm
+[submodule "deps/gabime-spdlog"]
+	path = deps/gabime-spdlog
+	url = https://github.com/gabime/spdlog
+[submodule "deps/taywee-args"]
+	path = deps/taywee-args
+	url = https://github.com/taywee/args
+[submodule "deps/p-ranav-argparse"]
+	path = deps/p-ranav-argparse
+	url = https://github.com/p-ranav/argparse
+[submodule "deps/h2o-picotest"]
+	path = deps/h2o-picotest
+	url = https://github.com/h2o/picotest

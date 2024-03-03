@@ -5,3 +5,13 @@ deps/matheus28-ws28/src
 deps/dcdpr-libbech32/include
 -I
 deps/nlohmann-json/include
+-I
+deps/bitcoin-core-libsecp256k1/include
+-I
+deps/libuv-libuv/include
+-I
+deps/gabime-spdlog/include
+-I
+deps/p-ranav-argparse/include
+-I
+deps/h2o-picotest

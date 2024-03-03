@@ -1,163 +1,176 @@
+#include "cagliostr.hxx"
+#include "version.h"
 #include <Server.h>
-#include <algorithm>
-#include <cctype>
-#include <exception>
-#include <iostream>
-#include <stdexcept>
-#include <string>
 
-#include <libbech32/bech32.h>
-#include <nlohmann/json.hpp>
-#include <openssl/evp.h>
-#include <openssl/x509v3.h>
+#include "spdlog/cfg/env.h"
+#include "spdlog/common.h"
+#include "spdlog/spdlog.h"
+#include <argparse/argparse.hpp>
 
-#include <secp256k1.h>
-#include <secp256k1_schnorrsig.h>
-
-typedef struct {
-  std::string id;
-  std::string pubkey;
-  std::time_t created_at;
-  int kind;
-  std::vector<std::vector<std::string>> tags;
-  std::string content;
-  std::string sig;
-} event_t;
-
-std::vector<event_t> events;
-
-typedef struct {
-  std::vector<std::string> ids;
-  std::vector<std::string> authors;
-  std::vector<int> kinds;
-  std::vector<std::vector<std::string>> tags;
-  std::time_t since;
-  std::time_t until;
-} filter_t;
-
-typedef struct {
-  ws28::Client *client;
+typedef struct subscriber_t {
+  std::string sub;
+  ws28::Client *client{};
   std::vector<filter_t> filters;
 } subscriber_t;
 
-std::map<std::string, subscriber_t> subscribers;
+// global variables
+std::vector<subscriber_t> subscribers;
 
-static std::string hex2string(const uint8_t *data, int len) {
-  std::stringstream ss;
-  ss << std::hex;
-  for (int i(0); i < len; ++i)
-    ss << std::setw(2) << std::setfill('0') << (int)data[i];
-  return ss.str();
-}
-
-static std::vector<uint8_t> hex2bytes(const std::string &hex) {
-  std::vector<uint8_t> bytes;
-  for (unsigned int i = 0; i < hex.length(); i += 2) {
-    std::string s = hex.substr(i, 2);
-    uint8_t byte = (uint8_t)strtol(s.c_str(), nullptr, 16);
-    bytes.push_back(byte);
-  }
-  return bytes;
-}
-
-static void relay_send(ws28::Client *client, nlohmann::json data) {
+static void relay_send(ws28::Client *client, const nlohmann::json &data) {
+  assert(client);
   auto s = data.dump();
-  std::cout << s << std::endl;
-  client->Send(s.data(), s.size());
+  spdlog::debug("{} << {}", client->GetIP(), s);
+  client->Send(s.data(), s.size(), 1);
 }
 
-static void relay_final(ws28::Client *client, std::string id, std::string msg) {
-  nlohmann::json data = {"CLOSED", id, msg};
+static inline void relay_notice(ws28::Client *client, const std::string &msg) {
+  assert(client);
+  nlohmann::json data = {"NOTICE", msg};
   relay_send(client, data);
-  client->Close(0);
 }
 
-static bool signature_verify(secp256k1_context *ctx,
-                             const std::vector<uint8_t> &bytessig,
-                             const std::vector<uint8_t> &bytespub,
-                             const uint8_t *digest) {
-  secp256k1_xonly_pubkey pub;
-  secp256k1_ecdsa_signature sig;
-  if (!secp256k1_xonly_pubkey_parse(ctx, &pub, bytespub.data())) {
+static inline void relay_notice(ws28::Client *client, const std::string &id,
+                                const std::string &msg) {
+  assert(client);
+  nlohmann::json data = {"NOTICE", id, msg};
+  relay_send(client, data);
+}
+
+static bool is_hex(const std::string &s, size_t len) {
+  const static std::string hex = "0123456789abcdef";
+  if (s.size() != len) {
     return false;
   }
+  for (const auto &c : s) {
+    if (hex.find(c) == std::string::npos) {
+      return false;
+    }
+  }
+  return true;
+}
 
-  return secp256k1_schnorrsig_verify(ctx, bytessig.data(), digest,
-#ifdef SECP256K1_SCHNORRSIG_EXTRAPARAMS_INIT
-                                     32,
-#endif
-                                     &pub);
+static bool make_filter(filter_t &filter, nlohmann::json &data) {
+  if (data.count("ids") > 0) {
+    for (const auto &id : data["ids"]) {
+      if (!is_hex(id, 64))
+        return false;
+      filter.ids.push_back(id);
+    }
+  }
+  if (data.count("authors") > 0) {
+    for (const auto &author : data["authors"]) {
+      if (!is_hex(author, 64))
+        return false;
+      filter.authors.push_back(author);
+    }
+  }
+  if (data.count("kinds") > 0) {
+    for (const auto &kind : data["kinds"]) {
+      filter.kinds.push_back(kind);
+    }
+  }
+  for (nlohmann::json::iterator it = data.begin(); it != data.end(); ++it) {
+    if (it.key().at(0) == '#' && it.value().is_array()) {
+      std::vector<std::string> tag = {it.key().c_str() + 1};
+      for (const auto &v : it.value()) {
+        tag.push_back(v);
+      }
+      filter.tags.push_back(tag);
+    }
+  }
+  if (data.count("since") > 0) {
+    filter.since = data["since"];
+  }
+  if (data.count("until") > 0) {
+    filter.until = data["until"];
+  }
+  if (data.count("limit") > 0) {
+    filter.limit = data["limit"];
+  }
+  if (data.count("search") > 0) {
+    filter.search = data["search"];
+  }
+  return true;
 }
 
 static void do_relay_req(ws28::Client *client, nlohmann::json &data) {
+  assert(client);
   std::string sub = data[1];
-  if (subscribers.count(sub) != 0) {
-    relay_final(client, sub, "error: duplicate subscriber");
-    return;
-  }
   std::vector<filter_t> filters;
-  for (int i = 2; i < data.size(); i++) {
+  for (size_t i = 2; i < data.size(); i++) {
     if (!data[i].is_object()) {
       continue;
     }
-    filter_t filter = {
-        .since = 0,
-        .until = 0,
-    };
-    if (data[i].count("ids") > 0) {
-      for (const auto id : data[i]["ids"]) {
-        filter.ids.push_back(id);
+    try {
+      filter_t filter;
+      if (!make_filter(filter, data[i])) {
+        continue;
       }
+      filters.push_back(filter);
+    } catch (std::exception &e) {
+      spdlog::warn("!! {}", e.what());
     }
-    if (data[i].count("authors") > 0) {
-      for (const auto author : data[i]["authors"]) {
-        filter.authors.push_back(author);
-      }
-    }
-    if (data[i].count("kinds") > 0) {
-      for (const auto kind : data[i]["kinds"]) {
-        filter.authors.push_back(kind);
-      }
-    }
-    for (nlohmann::json::iterator it = data[i].begin(); it != data[i].end(); ++it) {
-      if (it.key().at(0) == '#' && it.value().is_array()) {
-        std::vector<std::string> tag = {it.key().c_str()+1};
-        for (const auto v : it.value()) {
-          tag.push_back(v);
-        }
-        filter.tags.push_back(tag);
-      }
-    }
-    if (data[i].count("since") > 0) {
-      filter.since = data[i]["since"];
-    }
-    if (data[i].count("until") > 0) {
-      filter.until = data[i]["until"];
-    }
-    filters.push_back(filter);
   }
-  subscribers[sub] = {.client = client, .filters = filters};
-  auto eose = nlohmann::json::array({"EOSE", sub});
-  relay_send(client, eose);
+  if (filters.empty()) {
+    auto reply =
+        nlohmann::json::array({"NOTICE", sub, "error: invalid filter"});
+    relay_send(client, reply);
+    return;
+  }
+  subscribers.push_back({.sub = sub, .client = client, .filters = filters});
+
+  send_records([&](const nlohmann::json &data) { relay_send(client, data); },
+               sub, filters, false);
+  auto reply = nlohmann::json::array({"EOSE", sub});
+  relay_send(client, reply);
+}
+
+static void do_relay_count(ws28::Client *client, nlohmann::json &data) {
+  assert(client);
+  std::string sub = data[1];
+  std::vector<filter_t> filters;
+  for (size_t i = 2; i < data.size(); i++) {
+    if (!data[i].is_object()) {
+      filters.clear();
+      break;
+    }
+    try {
+      filter_t filter;
+      if (!make_filter(filter, data[i])) {
+        filters.clear();
+        break;
+      }
+      filters.push_back(filter);
+    } catch (std::exception &e) {
+      spdlog::warn("!! {}", e.what());
+    }
+  }
+  if (filters.empty()) {
+    auto reply =
+        nlohmann::json::array({"NOTICE", sub, "error: invalid filter"});
+    relay_send(client, reply);
+    return;
+  }
+
+  send_records([&](const nlohmann::json &data) { relay_send(client, data); },
+               sub, filters, true);
 }
 
 static void do_relay_close(ws28::Client *client, nlohmann::json &data) {
+  assert(client);
   std::string sub = data[1];
-  if (subscribers.count(sub) == 0) {
-    relay_final(client, sub, "error: invalid request");
-    return;
+  auto it = subscribers.begin();
+  while (it != subscribers.end()) {
+    if (it->sub == sub && it->client == client) {
+      it = subscribers.erase(it);
+    } else {
+      it++;
+    }
   }
-  auto ss = subscribers[sub];
-  nlohmann::json reply = {"CLOSED", sub, "OK"};
-  relay_send(client, reply);
-  client->Close(0);
-  relay_final(client, sub, "OK");
-  ss.client->Destroy();
-  subscribers.erase(sub);
 }
 
 static bool matched_filters(const std::vector<filter_t> &filters,
-                            const event_t& ev) {
+                            const event_t &ev) {
   auto found = false;
   for (const auto &filter : filters) {
     if (!filter.ids.empty()) {
@@ -181,12 +194,12 @@ static bool matched_filters(const std::vector<filter_t> &filters,
       }
     }
     if (filter.since > 0) {
-      if (filter.since <= ev.created_at) {
+      if (filter.since > ev.created_at) {
         continue;
       }
     }
     if (filter.until > 0) {
-      if (ev.created_at <= filter.until) {
+      if (ev.created_at > filter.until) {
         continue;
       }
     }
@@ -195,10 +208,10 @@ static bool matched_filters(const std::vector<filter_t> &filters,
       for (const auto &tag : ev.tags) {
         if (tag.size() < 2)
           continue;
-        for (const auto &mtag : filter.tags) {
-          if (mtag.size() < 2)
+        for (const auto &filter_tag : filter.tags) {
+          if (filter_tag.size() < 2)
             continue;
-          if (tag == mtag) {
+          if (tag == filter_tag) {
             matched = true;
             break;
           }
@@ -216,102 +229,324 @@ static bool matched_filters(const std::vector<filter_t> &filters,
   return found;
 }
 
+static void to_json(nlohmann::json& j, const event_t& e) {
+  j = nlohmann::json{
+    {"id", e.id},
+    {"pubkey", e.pubkey},
+    {"content", e.content},
+    {"created_at", e.created_at},
+    {"kind", e.kind},
+    {"tags", e.tags},
+    {"sig", e.sig},
+  };
+}
+
+static void from_json(const nlohmann::json& j, event_t& e) {
+  j.at("id").get_to(e.id);
+  j.at("pubkey").get_to(e.pubkey);
+  j.at("content").get_to(e.content);
+  j.at("created_at").get_to(e.created_at);
+  j.at("kind").get_to(e.kind);
+  j.at("tags").get_to(e.tags);
+  j.at("sig").get_to(e.sig);
+}
+
 static void do_relay_event(ws28::Client *client, nlohmann::json &data) {
-  auto ej = data[1];
-  event_t ev;
   try {
-    ev.id = ej["id"];
-    ev.pubkey = ej["pubkey"];
-    ev.content = ej["content"];
-    ev.created_at = ej["created_at"];
-    ev.kind = ej["kind"];
-    ev.tags = ej["tags"];
-    ev.sig = ej["sig"];
-
-    const nlohmann::json check = {0,       ev.pubkey, ev.created_at,
-                                  ev.kind, ev.tags,   ev.content};
-    auto dump = check.dump();
-
-    uint8_t digest[32] = {0};
-    EVP_Digest(dump.data(), dump.size(), digest, nullptr, EVP_sha256(),
-               nullptr);
-
-    std::cout << dump << std::endl;
-    auto id = hex2string(digest, 32);
-    if (id != ev.id) {
-      relay_final(client, "", "error: invalid id");
+    const event_t ev = data[1];
+    if (!check_event(ev)) {
+      relay_notice(client, "error: invalid id or signature");
       return;
     }
 
-    secp256k1_context *ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN |
-                                                      SECP256K1_CONTEXT_VERIFY);
-    auto bytessig = hex2bytes(ev.sig);
-    auto bytespub = hex2bytes(ev.pubkey);
-    if (!signature_verify(ctx, bytessig, bytespub, digest)) {
-      secp256k1_context_destroy(ctx);
-      relay_final(client, "", "error: invalid signature");
-      return;
+    if (ev.kind == 5) {
+      for (const auto &tag : ev.tags) {
+        if (tag.size() >= 2 && tag[0] == "e") {
+          for (size_t i = 1; i < tag.size(); i++) {
+            if (delete_record_by_id(tag[i]) < 0) {
+              return;
+            }
+          }
+        }
+      }
+    } else {
+      if (20000 <= ev.kind && ev.kind < 30000) {
+        return;
+      } else if (ev.kind == 0 || ev.kind == 3 ||
+                 (10000 <= ev.kind && ev.kind < 20000)) {
+        if (delete_record_by_kind_and_pubkey(ev.kind, ev.pubkey) < 0) {
+          return;
+        }
+      } else if (30000 <= ev.kind && ev.kind < 40000) {
+        std::string d;
+        for (const auto &tag : ev.tags) {
+          if (tag.size() >= 2 && tag[0] == "d") {
+            if (delete_record_by_kind_and_pubkey_and_dtag(ev.kind, ev.pubkey,
+                                                          tag) < 0) {
+              return;
+            }
+          }
+        }
+      }
+
+      if (insert_record(ev) != 1) {
+        relay_notice(client, "error: duplicate event");
+        return;
+      }
     }
-    secp256k1_context_destroy(ctx);
 
     for (const auto &s : subscribers) {
-      if (id == s.first) {
-        continue;
-      }
-      std::cout << s.first << std::endl;
-      auto found = false;
-      if (matched_filters(s.second.filters, ev)) {
-        nlohmann::json data = {"EVENT", s.first, ej};
-        relay_send(s.second.client, data);
+      if (matched_filters(s.filters, ev)) {
+        nlohmann::json reply = {"EVENT", s.sub, ev};
+        relay_send(s.client, reply);
       }
     }
-    relay_final(client, "", "OK");
+    nlohmann::json reply = {"OK", ev.id, true, ""};
+    relay_send(client, reply);
   } catch (std::exception &e) {
-    std::cout << e.what() << std::endl;
+    spdlog::warn("!! {}", e.what());
   }
+}
+
+static auto html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<title>Cagliostr</title>
+<style>
+#content {
+  margin: 50vh auto 0;
+  transform: translateY(-50%);
+  padding: 15px 30px;
+  text-align: center;
+  font-size: 2em;
+}
+</style>
+</head>
+<body>
+<div id="content">
+<p>Cagliostr the Nostr relay server</p>
+<p><img src="https://raw.githubusercontent.com/mattn/cagliostr/main/cagliostr.png" /></p>
+</div>
+</body>
+</html>
+)";
+
+static auto nip11 = R"({
+  "name": "cagliostr",
+  "description": "nostr relay written in C++",
+  "pubkey": "2c7cc62a697ea3a7826521f3fd34f0cb273693cbe5e9310f35449f43622a5cdc",
+  "contact": "mattn.jp@gmail.com",
+  "supported_nips": [1, 2, 4, 9, 11, 12, 15, 16, 20, 22, 33, 42, 45, 50],
+  "software": "https://github.com/mattn/cagliostr",
+  "version": "develop",
+  "limitation": {
+    "max_message_length": 524288,
+    "max_subscriptions": 20,
+    "max_filters": 10,
+    "max_limit": 500,
+    "max_subid_length": 100,
+    "max_event_tags": 100,
+    "max_content_length": 16384,
+    "min_pow_difficulty": 30,
+    "auth_required": false,
+    "payment_required": false,
+    "restricted_writes": false
+  },
+  "fees": {},
+  "icon": "https://raw.githubusercontent.com/mattn/cagliostr/main/cagliostr.png"
+})"_json;
+
+static void http_request_callback(ws28::HTTPRequest &req,
+                                  ws28::HTTPResponse &resp) {
+  spdlog::debug("{} >> {} {}", req.ip, req.method, req.path);
+  resp.header("Access-Control-Allow-Origin", "*");
+  if (req.method == "GET") {
+    auto accept = req.headers.Get("accept");
+    if (accept.has_value() && accept.value() == "application/nostr+json") {
+      resp.status(200);
+      resp.header("content-type", "application/json; charset=UTF-8");
+      resp.send(nip11.dump());
+    } else if (req.path == "/") {
+      resp.status(200);
+      resp.header("content-type", "text/html; charset=UTF-8");
+      resp.send(html);
+    } else {
+      resp.status(404);
+      resp.header("content-type", "text/html; charset=UTF-8");
+      resp.send("Not Found\n");
+    }
+  }
+}
+
+static void connect_callback(ws28::Client * /*client*/,
+                             ws28::HTTPRequest &req) {
+  spdlog::debug("CONNECTED {}", req.ip);
+}
+
+static bool tcpcheck_callback(std::string_view ip, bool secure) {
+  spdlog::debug("TCPCHECK {} {}", ip, secure);
+  return true;
+}
+
+static bool check_callback(ws28::Client * /*client*/, ws28::HTTPRequest &req) {
+  spdlog::debug("CHECK {}", req.ip);
+  return true;
+}
+
+static void disconnect_callback(ws28::Client *client) {
+  assert(client);
+  spdlog::debug("DISCONNECT {}", client->GetIP());
+  auto it = subscribers.begin();
+  while (it != subscribers.end()) {
+    if (it->client == client) {
+      it = subscribers.erase(it);
+    } else {
+      it++;
+    }
+  }
+}
+
+static inline bool check_method(std::string &method) {
+  return method == "EVENT" || method == "REQ" || method == "COUNT" ||
+         method == "CLOSE";
 }
 
 static void data_callback(ws28::Client *client, char *data, size_t len,
                           int opcode) {
-  std::string s;
-  s.append(data, len);
-  std::cout << s << std::endl;
-  auto payload = nlohmann::json::parse(s);
+  assert(client);
+  assert(data);
 
-  if (!payload.is_array() || payload.size() < 2) {
-    nlohmann::json data = {"CLOSED", "", "error: invalid request"};
-  }
-
-  std::string method = payload[0];
-  if (payload[0] != "EVENT" && payload[0] != "REQ" && payload[0] != "COUNT" &&
-      payload[0] != "CLOSE") {
-    relay_final(client, "", "error: invalid request");
+  if (opcode != 1) {
     return;
   }
-  if (method == "REQ") {
-    if (payload.size() < 3) {
-      relay_final(client, "", "error: invalid request");
+
+  std::string s(data, len);
+  spdlog::debug("{} >> {}", client->GetIP(), s);
+  try {
+    auto payload = nlohmann::json::parse(s);
+
+    if (!payload.is_array() || payload.size() < 2 || !payload[0].is_string()) {
+      relay_notice(client, "error: invalid request");
       return;
     }
-    do_relay_req(client, payload);
-    return;
-  }
-  if (method == "CLOSE") {
-    do_relay_close(client, payload);
-    return;
-  }
-  if (method == "EVENT") {
-    do_relay_event(client, payload);
-    return;
-  }
 
-  client->Close(0);
+    std::string method = payload[0];
+    if (!check_method(method)) {
+      relay_notice(client, payload[1], "error: invalid request");
+      return;
+    }
+    if (method == "REQ") {
+      if (payload.size() < 3) {
+        relay_notice(client, payload[1], "error: invalid request");
+        return;
+      }
+      do_relay_req(client, payload);
+      return;
+    }
+    if (method == "COUNT") {
+      if (payload.size() < 3) {
+        relay_notice(client, payload[1], "error: invalid request");
+        return;
+      }
+      do_relay_count(client, payload);
+      return;
+    }
+    if (method == "CLOSE") {
+      do_relay_close(client, payload);
+      return;
+    }
+    if (method == "EVENT") {
+      do_relay_event(client, payload);
+      return;
+    }
+    relay_notice(client, payload[1], "error: invalid request");
+  } catch (std::exception &e) {
+    spdlog::warn("!! {}", e.what());
+    relay_notice(client, std::string("error: ") + e.what());
+  }
+}
+
+static void signal_handler(uv_signal_t *req, int /*signum*/) {
+  assert(req);
+  uv_signal_stop(req);
+  spdlog::warn("!! SIGINT");
+  for (auto &s : subscribers) {
+    if (s.client == nullptr) {
+      continue;
+    }
+    relay_notice(s.client, s.sub, "shutdown...");
+    s.client->Close(0);
+    s.client = nullptr;
+  }
+  uv_stop(req->loop);
+}
+
+static std::string env(const char *name, const char *default_value) {
+  assert(name);
+  assert(default_value);
+  const char *value = std::getenv(name);
+  if (value == nullptr) {
+    value = default_value;
+  }
+  return value;
+}
+
+static void server(short port) {
+  uv_loop_t *loop = uv_default_loop();
+  auto server = ws28::Server{loop, nullptr};
+  server.SetClientDataCallback(data_callback);
+  server.SetClientConnectedCallback(connect_callback);
+  server.SetClientDisconnectedCallback(disconnect_callback);
+  server.SetCheckTCPConnectionCallback(tcpcheck_callback);
+  server.SetMaxMessageSize(65535);
+  server.SetCheckConnectionCallback(check_callback);
+  server.SetHTTPCallback(http_request_callback);
+  server.Listen(port);
+  spdlog::info("server started :{}", port);
+
+  uv_signal_t sig;
+  uv_signal_init(loop, &sig);
+  uv_signal_start(&sig, signal_handler, SIGINT);
+
+  uv_run(loop, UV_RUN_DEFAULT);
 }
 
 int main(int argc, char *argv[]) {
-  ws28::Server server{uv_default_loop(), nullptr};
-  server.SetClientDataCallback(data_callback);
-  server.Listen(7447);
-  uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+  argparse::ArgumentParser program("cagliostr", VERSION);
+  try {
+    program.add_argument("-database")
+        .default_value(env("DATABASE_URL", "./cagliostr.sqlite"))
+        .help("connection string")
+        .metavar("DATABASE")
+        .nargs(1);
+    program.add_argument("-loglevel")
+        .default_value(env("SPDLOG_LEVEL", "info"))
+        .help("log level")
+        .metavar("LEVEL")
+        .nargs(1);
+    program.add_argument("-port")
+        .default_value((short)7447)
+        .help("port number")
+        .metavar("PORT")
+        .scan<'i', short>()
+        .nargs(1);
+    program.parse_args(argc, argv);
+  } catch (const std::exception &err) {
+    std::cerr << err.what() << std::endl;
+    std::cerr << program;
+    return 1;
+  }
+
+  nip11["version"] = VERSION;
+
+  spdlog::cfg::load_env_levels();
+  spdlog::set_level(
+      spdlog::level::from_str(program.get<std::string>("-loglevel")));
+  storage_init(program.get<std::string>("-database"));
+
+  server(program.get<short>("-port"));
+  storage_deinit();
   return 0;
 }

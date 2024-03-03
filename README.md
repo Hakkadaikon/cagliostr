@@ -1,23 +1,32 @@
 # cagliostr
 
-Experimental Nostr Relay written in C++
+High performance Nostr Relay written in C++
+
+![cagliostr](cagliostr.png)
 
 ## Usage
 
 ```
-$ ./cagliostr
+$ ./cagliostr --help
+Usage: cagliostr [--help] [--version] [-database DATABASE] [-loglevel LEVEL]
+
+Optional arguments:
+  -h, --help          shows help message and exits 
+  -v, --version       prints version information and exits 
+  -database DATABASE  connection string [default: "./cagliostr.sqlite"]
+  -loglevel LEVEL     log level [default: "info"]
 ```
 
 ## Requirements
 
-* libsecp256k1
 * OpenSSL
-* libuv
+* libsqlite3
 
 ## Installation
 
 ```
-$ make
+$ git submodule update --init --recursive
+$ cmake -B build && cmake --build build
 ```
 
 ## License
