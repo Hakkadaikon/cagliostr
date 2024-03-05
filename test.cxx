@@ -10,7 +10,7 @@
 
 #include <filesystem>
 
-static event_t string2event(auto &string) {
+static event_t string2event(const char* string) {
   auto ej = nlohmann::json::parse(string);
   event_t ev;
   ev.id = ej["id"];
