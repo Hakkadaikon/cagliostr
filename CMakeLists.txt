@@ -5,8 +5,12 @@ include(CheckLibraryExists)
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -std=c++20 -Wall -Wextra ${CMAKE_C_FLAGS}")
-set(CMAKE_CXX_FLAGS_DEBUG "-g -std=c++20 -Wall -Wextra ${CMAKE_C_FLAGS}")
+#set(CMAKE_CXX_FLAGS_RELEASE "-O3 -std=c++20 -Wall -Wextra ${CMAKE_C_FLAGS}")
+#set(CMAKE_CXX_FLAGS_DEBUG "-g -std=c++20 -Wall -Wextra ${CMAKE_C_FLAGS}")
+# TODO: Mac OS build
+set(CXX g++)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -std=c++2a -Wall -Wextra ${CMAKE_C_FLAGS}")
+set(CMAKE_CXX_FLAGS_DEBUG "-g -std=c++2a -Wall -Wextra ${CMAKE_C_FLAGS}")
 
 #--------------------------------------------------
 # libuv
@@ -52,8 +56,14 @@ link_directories(${CMAKE_CURRENT_SOURCE_DIR}/deps/gabime-spdlog/build)
 # cagliostr-core
 set (t_ cagliostr-core)
 
+# TODO: Add libcrypto, openssl library path
+link_directories(/usr/local/lib)
+link_directories(/usr/local/Cellar/openssl@3/3.2.1/lib)
+
+# TODO: Add nlohmann, openssl include directory path
 include_directories(
     ${t_}
+    /usr/local/include
     ${PROJECT_SOURCE_DIR}/deps/dcdpr-libbech32/include
     ${PROJECT_SOURCE_DIR}/deps/matheus28-ws28/src
     ${PROJECT_SOURCE_DIR}/deps/nlohmann-json/include
