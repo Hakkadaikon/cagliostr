@@ -30,18 +30,17 @@ typedef struct filter_t {
     std::string                           search;
 } filter_t;
 
+// records.cxx
 void storage_init(const std::string&);
 void storage_deinit();
 bool insert_record(const event_t&);
+bool send_records(std::function<void(const nlohmann::json&)>, const std::string&, const std::vector<filter_t>&, bool);
 
 int delete_record_by_id(const std::string&);
 int delete_record_by_kind_and_pubkey(int, const std::string&);
-int delete_record_by_kind_and_pubkey_and_dtag(int, const std::string&,
-                                              const std::vector<std::string>&);
+int delete_record_by_kind_and_pubkey_and_dtag(int, const std::string&, const std::vector<std::string>&);
 
-bool send_records(std::function<void(const nlohmann::json&)>,
-                  const std::string&, const std::vector<filter_t>&, bool);
-
+// sign.cxx
 bool check_event(const event_t&);
 
 #endif

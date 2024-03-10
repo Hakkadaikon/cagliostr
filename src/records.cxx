@@ -18,6 +18,20 @@ typedef struct param_t {
     std::string s{};
 } param_t;
 
+static std::string join(const std::vector<std::string>& v, const char* delim /* = 0*/);
+static std::string escape(const std::string& data);
+static void        sqlite3_trace_callback(void* /*user_data*/, const char* statement);
+bool               insert_record(const event_t& ev);
+bool               send_records(std::function<void(const nlohmann::json&)> sender,
+                                const std::string& sub, const std::vector<filter_t>& filters,
+                                bool do_count);
+int                delete_record_by_id(const std::string& id);
+int                delete_record_by_kind_and_pubkey(int kind, const std::string& pubkey);
+int                delete_record_by_kind_and_pubkey_and_dtag(
+                   int kind, const std::string& pubkey, const std::vector<std::string>& tag);
+void storage_init(const std::string& dsn);
+void storage_deinit();
+
 static std::string join(const std::vector<std::string>& v,
                         const char*                     delim = 0)
 {

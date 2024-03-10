@@ -15,6 +15,116 @@ typedef struct subscriber_t {
 
 // global variables
 std::vector<subscriber_t> subscribers;
+static auto               html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<title>Cagliostr</title>
+<style>
+#content {
+  margin: 50vh auto 0;
+  transform: translateY(-50%);
+  padding: 15px 30px;
+  text-align: center;
+  font-size: 2em;
+}
+</style>
+</head>
+<body>
+<div id="content">
+<p>Cagliostr the Nostr relay server</p>
+<p><img src="https://raw.githubusercontent.com/mattn/cagliostr/main/cagliostr.png" /></p>
+</div>
+</body>
+</html>
+)";
+
+static auto nip11 = R"({
+  "name": "cagliostr",
+  "description": "nostr relay written in C++",
+  "pubkey": "2c7cc62a697ea3a7826521f3fd34f0cb273693cbe5e9310f35449f43622a5cdc",
+  "contact": "mattn.jp@gmail.com",
+  "supported_nips": [1, 2, 4, 9, 11, 12, 15, 16, 20, 22, 33, 42, 45, 50],
+  "software": "https://github.com/mattn/cagliostr",
+  "version": "develop",
+  "limitation": {
+    "max_message_length": 524288,
+    "max_subscriptions": 20,
+    "max_filters": 10,
+    "max_limit": 500,
+    "max_subid_length": 100,
+    "max_event_tags": 100,
+    "max_content_length": 16384,
+    "min_pow_difficulty": 30,
+    "auth_required": false,
+    "payment_required": false,
+    "restricted_writes": false
+  },
+  "fees": {},
+  "icon": "https://raw.githubusercontent.com/mattn/cagliostr/main/cagliostr.png"
+})"_json;
+
+static void        relay_send(ws28::Client* client, const nlohmann::json& data);
+static inline void relay_notice(ws28::Client* client, const std::string& msg);
+static inline void relay_notice(ws28::Client* client, const std::string& id, const std::string& msg);
+static bool        is_hex(const std::string& s, size_t len);
+static bool        make_filter(filter_t& filter, nlohmann::json& data);
+static void        do_relay_req(ws28::Client* client, nlohmann::json& data);
+static void        do_relay_count(ws28::Client* client, nlohmann::json& data);
+static void        do_relay_close(ws28::Client* client, nlohmann::json& data);
+static bool        matched_filters(const std::vector<filter_t>& filters, const event_t& ev);
+static void        to_json(nlohmann::json& j, const event_t& e);
+static void        do_relay_event(ws28::Client* client, nlohmann::json& data);
+static void        http_request_callback(ws28::HTTPRequest& req, ws28::HTTPResponse& resp);
+static void        connect_callback(ws28::Client* /*client*/, ws28::HTTPRequest& req);
+static bool        tcpcheck_callback(std::string_view ip, bool secure);
+static bool        check_callback(ws28::Client* /*client*/, ws28::HTTPRequest& req);
+static void        disconnect_callback(ws28::Client* client);
+static inline bool check_method(std::string& method);
+static void        data_callback(ws28::Client* client, char* data, size_t len, int opcode);
+static void        signal_handler(uv_signal_t* req, int /*signum*/);
+static std::string env(const char* name, const char* default_value);
+static void        server(short port);
+
+int main(int argc, char* argv[])
+{
+    argparse::ArgumentParser program("cagliostr", VERSION);
+    try {
+        program.add_argument("-database")
+            .default_value(env("DATABASE_URL", "./cagliostr.sqlite"))
+            .help("connection string")
+            .metavar("DATABASE")
+            .nargs(1);
+        program.add_argument("-loglevel")
+            .default_value(env("SPDLOG_LEVEL", "info"))
+            .help("log level")
+            .metavar("LEVEL")
+            .nargs(1);
+        program.add_argument("-port")
+            .default_value((short)7447)
+            .help("port number")
+            .metavar("PORT")
+            .scan<'i', short>()
+            .nargs(1);
+        program.parse_args(argc, argv);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << program;
+        return 1;
+    }
+
+    nip11["version"] = VERSION;
+
+    spdlog::cfg::load_env_levels();
+    spdlog::set_level(
+        spdlog::level::from_str(program.get<std::string>("-loglevel")));
+    storage_init(program.get<std::string>("-database"));
+
+    server(program.get<short>("-port"));
+    storage_deinit();
+    return 0;
+}
 
 static void relay_send(ws28::Client* client, const nlohmann::json& data)
 {
@@ -31,8 +141,7 @@ static inline void relay_notice(ws28::Client* client, const std::string& msg)
     relay_send(client, data);
 }
 
-static inline void relay_notice(ws28::Client* client, const std::string& id,
-                                const std::string& msg)
+static inline void relay_notice(ws28::Client* client, const std::string& id, const std::string& msg)
 {
     assert(client);
     nlohmann::json data = {"NOTICE", id, msg};
@@ -177,8 +286,7 @@ static void do_relay_close(ws28::Client* client, nlohmann::json& data)
     }
 }
 
-static bool matched_filters(const std::vector<filter_t>& filters,
-                            const event_t&               ev)
+static bool matched_filters(const std::vector<filter_t>& filters, const event_t& ev)
 {
     auto found = false;
     for (const auto& filter : filters) {
@@ -320,58 +428,7 @@ static void do_relay_event(ws28::Client* client, nlohmann::json& data)
     }
 }
 
-static auto html = R"(
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8"/>
-<title>Cagliostr</title>
-<style>
-#content {
-  margin: 50vh auto 0;
-  transform: translateY(-50%);
-  padding: 15px 30px;
-  text-align: center;
-  font-size: 2em;
-}
-</style>
-</head>
-<body>
-<div id="content">
-<p>Cagliostr the Nostr relay server</p>
-<p><img src="https://raw.githubusercontent.com/mattn/cagliostr/main/cagliostr.png" /></p>
-</div>
-</body>
-</html>
-)";
-
-static auto nip11 = R"({
-  "name": "cagliostr",
-  "description": "nostr relay written in C++",
-  "pubkey": "2c7cc62a697ea3a7826521f3fd34f0cb273693cbe5e9310f35449f43622a5cdc",
-  "contact": "mattn.jp@gmail.com",
-  "supported_nips": [1, 2, 4, 9, 11, 12, 15, 16, 20, 22, 33, 42, 45, 50],
-  "software": "https://github.com/mattn/cagliostr",
-  "version": "develop",
-  "limitation": {
-    "max_message_length": 524288,
-    "max_subscriptions": 20,
-    "max_filters": 10,
-    "max_limit": 500,
-    "max_subid_length": 100,
-    "max_event_tags": 100,
-    "max_content_length": 16384,
-    "min_pow_difficulty": 30,
-    "auth_required": false,
-    "payment_required": false,
-    "restricted_writes": false
-  },
-  "fees": {},
-  "icon": "https://raw.githubusercontent.com/mattn/cagliostr/main/cagliostr.png"
-})"_json;
-
-static void http_request_callback(ws28::HTTPRequest&  req,
-                                  ws28::HTTPResponse& resp)
+static void http_request_callback(ws28::HTTPRequest& req, ws28::HTTPResponse& resp)
 {
     spdlog::debug("{} >> {} {}", req.ip, req.method, req.path);
     resp.header("Access-Control-Allow-Origin", "*");
@@ -393,8 +450,7 @@ static void http_request_callback(ws28::HTTPRequest&  req,
     }
 }
 
-static void connect_callback(ws28::Client* /*client*/,
-                             ws28::HTTPRequest& req)
+static void connect_callback(ws28::Client* /*client*/, ws28::HTTPRequest& req)
 {
     spdlog::debug("CONNECTED {}", req.ip);
 }
@@ -431,8 +487,7 @@ static inline bool check_method(std::string& method)
            method == "CLOSE";
 }
 
-static void data_callback(ws28::Client* client, char* data, size_t len,
-                          int opcode)
+static void data_callback(ws28::Client* client, char* data, size_t len, int opcode)
 {
     assert(client);
     assert(data);
@@ -533,43 +588,4 @@ static void server(short port)
     uv_signal_start(&sig, signal_handler, SIGINT);
 
     uv_run(loop, UV_RUN_DEFAULT);
-}
-
-int main(int argc, char* argv[])
-{
-    argparse::ArgumentParser program("cagliostr", VERSION);
-    try {
-        program.add_argument("-database")
-            .default_value(env("DATABASE_URL", "./cagliostr.sqlite"))
-            .help("connection string")
-            .metavar("DATABASE")
-            .nargs(1);
-        program.add_argument("-loglevel")
-            .default_value(env("SPDLOG_LEVEL", "info"))
-            .help("log level")
-            .metavar("LEVEL")
-            .nargs(1);
-        program.add_argument("-port")
-            .default_value((short)7447)
-            .help("port number")
-            .metavar("PORT")
-            .scan<'i', short>()
-            .nargs(1);
-        program.parse_args(argc, argv);
-    } catch (const std::exception& err) {
-        std::cerr << err.what() << std::endl;
-        std::cerr << program;
-        return 1;
-    }
-
-    nip11["version"] = VERSION;
-
-    spdlog::cfg::load_env_levels();
-    spdlog::set_level(
-        spdlog::level::from_str(program.get<std::string>("-loglevel")));
-    storage_init(program.get<std::string>("-database"));
-
-    server(program.get<short>("-port"));
-    storage_deinit();
-    return 0;
 }

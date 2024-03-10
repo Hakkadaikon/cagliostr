@@ -5,6 +5,13 @@
 #include <secp256k1.h>
 #include <secp256k1_schnorrsig.h>
 
+static inline std::vector<uint8_t> hex2bytes(const std::string& hex);
+static inline std::string          digest2hex(const uint8_t data[32]);
+static bool                        signature_verify(const std::vector<uint8_t>& bytes_sig,
+                                                    const std::vector<uint8_t>& bytes_pub,
+                                                    const uint8_t               digest[32]);
+bool                               check_event(const event_t& ev);
+
 static inline std::vector<uint8_t> hex2bytes(const std::string& hex)
 {
     std::vector<uint8_t> bytes;
